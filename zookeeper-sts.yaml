@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "tools.master.name" . | quote }}
+  namespace: {{ include "tools.namespace" . | quote }}
+  labels: {{ include "tools.labels" . | nindent 4 }}
+  {{- if .Values.commonAnnotations }}
+  annotations: {{- include "tools.commonannotations" . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels: {{ include "tools.selectorLabels" . | nindent 6 }}
+      componentName: {{ include "tools.master.name" . | quote }}
+  serviceName: {{ include "tools.service.headless" . | quote }}
+  replicas: {{ .Values.replicaCount }}
+  template:
+    metadata:
+      labels: {{ include "tools.selectorLabels" . | nindent 8 }}
+        componentName: {{ include "tools.master.name" . | quote }}
+      {{- if .Values.podAnnotations }}
+      annotations: {{- include "tools.podannotations" . | nindent 8 }}
+      {{- end }}
+    spec:
+      terminationGracePeriodSeconds: 10
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8}}
+      {{- end }}
+      initContainers:
+      - name: initialisation
+        image: {{ .Values.image.repository}}:{{ .Values.image.tag}}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env: 
+          - name: ZOO_SERVERS
+            {{- $replicaCount := int .Values.replicaCount }}
+            {{- $minServerId := int .Values.minServerId }}
+            {{- $followerPort := int .Values.service.ports.follower }}
+            {{- $electionPort := int .Values.service.ports.election }}
+            {{- $releaseNamespace := include "tools.namespace" . }}
+            {{- $zookeeperFullname := include "tools.names.fullname" . }}
+            {{- $zookeeperHeadlessServiceName := printf "%s-%s" $zookeeperFullname "headless" | trunc 63  }}
+            {{- $clusterDomain := .Values.clusterDomain }}
+            value: {{ range $i, $e := until $replicaCount }}{{ $zookeeperFullname }}-{{ $e }}.{{ $zookeeperHeadlessServiceName }}.{{ $releaseNamespace }}.svc.{{ $clusterDomain }}:{{ $followerPort }}:{{ $electionPort }}::{{ add $e $minServerId }} {{ end }}
+        command:
+          - /bin/bash
+        args:
+          - -ec
+          - |
+            mkdir -p /opt/zookeeper/data/conf
+            rm -f /opt/zookeeper/data/conf/zoo_replicated1.cfg.dynamic
+            SET_INDEX=${HOSTNAME##*-}
+            echo "Starting initializing for pod $SET_INDEX"
+            echo $SET_INDEX > /opt/zookeeper/data/myid
+            read -r -a zookeeper_servers_list <<<"${ZOO_SERVERS//[;, ]/ }"
+            for server in "${zookeeper_servers_list[@]}"; do
+                read -r -a srv <<<"${server//::/ }"
+                echo "server.${srv[1]}" "${srv[0]};2181" >> /opt/zookeeper/data/conf/zoo_replicated1.cfg.dynamic
+            done
+        volumeMounts:
+          - name: data
+            mountPath: /opt/zookeeper/data
+      containers:
+      - name: zookeeper-master
+        image: {{ .Values.image.repository}}:{{ .Values.image.tag}}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+          - containerPort: {{ .Values.service.ports.client }}
+            name: client
+            protocol: TCP
+          - containerPort: {{ .Values.service.ports.follower }}
+            name: follower
+            protocol: TCP
+          - containerPort: {{ .Values.service.ports.election }}
+            name: election
+            protocol: TCP
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}          
+        env:
+          - name: ZOO_SERVERS
+            {{- $replicaCount := int .Values.replicaCount }}
+            {{- $minServerId := int .Values.minServerId }}
+            {{- $followerPort := int .Values.service.ports.follower }}
+            {{- $electionPort := int .Values.service.ports.election }}
+            {{- $releaseNamespace := include "tools.namespace" . }}
+            {{- $zookeeperFullname := include "tools.names.fullname" . }}
+            {{- $zookeeperHeadlessServiceName := printf "%s-%s" $zookeeperFullname "headless" | trunc 63  }}
+            {{- $clusterDomain := .Values.clusterDomain }}
+            value: {{ range $i, $e := until $replicaCount }}{{ $zookeeperFullname }}-{{ $e }}.{{ $zookeeperHeadlessServiceName }}.{{ $releaseNamespace }}.svc.{{ $clusterDomain }}:{{ $followerPort }}:{{ $electionPort }}::{{ add $e $minServerId }} {{ end }}
+
+          - name: ZOO_MY_ID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+        volumeMounts:
+          - name: zk-config
+            mountPath: /opt/zookeeper/conf/zoo.cfg
+            subPath: zoo.cfg
+            #readOnly: true
+          - name: zk-log
+            mountPath: /opt/zookeeper/conf/logback.xml
+            subPath: logback.xml
+            readOnly: true
+          #- name: zk-id
+          #  mountPath: /opt/scripts/id.sh
+          #  subPath: id.sh
+          - name: data
+            mountPath: /opt/zookeeper/data
+          #- name: zk-conf-dir
+          #  mountPath: /opt/zookeeper/conf
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}  
+      volumes:
+        - name: zk-config
+          configMap:
+            name: {{ .Release.Name }}-zk-cm
+            defaultMode: 0777
+        - name: zk-log
+          configMap:
+            name: {{ .Release.Name }}-zk-cm
+        #- name: zk-id
+        #  configMap:
+        #    name: {{ .Release.Name }}-zk-cm
+        #    defaultMode: 0755
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard"
+      resources:
+        requests:
+          storage: "100Mi"
+  #- metadata:
+  #    name: zk-conf-dir
+  #  spec:
+  #    accessModes: [ "ReadWriteOnce" ]
+  #    storageClassName: "standard"
+  #    resources:
+  #      requests:
+  #        storage: "100Mi"          

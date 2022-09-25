@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tools.service.name" . | quote }}
+  namespace: {{ include "tools.namespace" . | quote }}
+  labels: {{ include "tools.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: tcp-client
+      port: {{ .Values.service.ports.client }}
+      targetPort: client
+      protocol: TCP    
+  selector: {{ include "tools.selectorLabels" . | nindent 4 }}
+    componentName: {{ include "tools.master.name" . | quote }}
